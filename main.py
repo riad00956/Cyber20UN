@@ -12,7 +12,7 @@ import re
 
 # Flask & SocketIO Setup
 app = Flask(__name__)
-app.config['cyberhost'] = secrets.token_urlsafe(32)
+app.config['SECRET_KEY'] = secrets.token_urlsafe(32)
 app.config['PERMANENT_SESSION_LIFETIME'] = 3600
 
 # Threading mode for Render.com compatibility
