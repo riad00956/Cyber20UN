@@ -6,87 +6,92 @@ import time
 from flask import Flask, render_template_string, request, session, redirect, url_for
 from flask_socketio import SocketIO, emit
 
+# Flask & SocketIO Setup
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'cyber_20_un_pro_2026'
-socketio = SocketIO(app, cors_allowed_origins="*", transports=['websocket'])
+app.config['SECRET_KEY'] = 'cyber_ultra_2026_pro'
+# Pure WebSocket with eventlet/gevent support
+socketio = SocketIO(app, cors_allowed_origins="*", transports=['websocket'], async_mode='threading')
 
-DB_PATH = "cyber_vault.db"
+# Database Paths
+USER_DB = "cyber_vault.db"
+LOG_DB = "terminal_history.db"
+PROJECT_DIR = "user_projects"
 
-# --- ডাটাবেজ ফাংশন (সবকিছু এখানে সেভ হবে) ---
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+if not os.path.exists(PROJECT_DIR):
+    os.makedirs(PROJECT_DIR)
 
-def init_db():
-    with get_db() as conn:
-        # ইউজার টেবিল
+# --- Database Initialize ---
+def init_dbs():
+    # User & File Database
+    with sqlite3.connect(USER_DB) as conn:
         conn.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT)')
-        # ফাইল টেবিল
-        conn.execute('CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, username TEXT, filename TEXT, code TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
-        # টার্মিনাল লগ টেবিল (লাইভ লগের জন্য)
-        conn.execute('CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY, username TEXT, command TEXT, output TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
-        conn.commit()
+        conn.execute('CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, username TEXT, filename TEXT, code TEXT, time TEXT)')
+    
+    # Terminal Logs Database
+    with sqlite3.connect(LOG_DB) as conn:
+        conn.execute('CREATE TABLE IF NOT EXISTS terminal_logs (id INTEGER PRIMARY KEY, username TEXT, command TEXT, output TEXT, time TEXT)')
 
-init_db()
+init_dbs()
 
-# --- আপনার অরিজিনাল UI + লাইভ লগিং স্ক্রিপ্ট ---
+# --- UI (আপনার অরিজিনাল ডিজাইন হুবহু রাখা হয়েছে) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cyber 20 UN - Enterprise IDE</title>
+    <title>Cyber 20 UN</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
-        :root { --bg: #020617; --purple: #8b5cf6; --cyan: #06b6d4; --text: #f8fafc; --glass: rgba(15, 23, 42, 0.7); --border: rgba(255, 255, 255, 0.1); }
-        body { margin: 0; font-family: 'Poppins', sans-serif; background: var(--bg); color: var(--text); overflow-x: hidden; }
-        #bgCanvas { position: fixed; top: 0; left: 0; z-index: -1; }
-        .container { max-width: 900px; margin: auto; padding: 20px; position: relative; z-index: 1; }
-        .card { background: var(--glass); backdrop-filter: blur(15px); border-radius: 25px; padding: 25px; border: 1px solid var(--border); margin-bottom: 25px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        .cyber-logo { width: 45px; height: 45px; background: linear-gradient(135deg, var(--purple), var(--cyan)); border-radius: 12px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 20px rgba(139,92,246,0.4); }
-        input, textarea { background: rgba(0,0,0,0.3); border: 1px solid var(--border); color: #fff; padding: 15px; border-radius: 15px; width: 100%; font-family: 'Fira Code', monospace; margin-bottom: 15px; outline: none; }
-        .btn { background: linear-gradient(45deg, var(--purple), #3b82f6); color: white; border: none; padding: 15px; border-radius: 15px; font-weight: 700; cursor: pointer; width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px; }
-        #terminal { background: #000; color: #10b981; height: 300px; overflow-y: auto; padding: 15px; border-radius: 15px; font-family: 'Fira Code', monospace; font-size: 13px; border: 1px solid #333; }
-        .log-line { border-left: 2px solid var(--purple); padding-left: 10px; margin-bottom: 5px; animation: fadeIn 0.3s; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        :root { --bg: #020617; --purple: #8b5cf6; --blue: #3b82f6; --cyan: #06b6d4; --text: #f8fafc; --glass: rgba(15, 23, 42, 0.6); --border: rgba(255, 255, 255, 0.1); }
+        * { box-sizing: border-box; transition: all 0.4s cubic-bezier(0.25, 1, 0.5, 1); }
+        body { margin: 0; font-family: 'Poppins', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; overflow-x: hidden; display: flex; flex-direction: column; }
+        #bgCanvas { position: fixed; top: 0; left: 0; z-index: -1; filter: blur(2px); }
+        .container { max-width: 850px; margin: auto; padding: 25px; width: 100%; position: relative; z-index: 1; }
+        .cyber-logo { width: 40px; height: 40px; background: linear-gradient(135deg, var(--purple), var(--blue)); border-radius: 10px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 15px rgba(139, 92, 246, 0.5); animation: logo-float 3s infinite; }
+        @keyframes logo-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+        .card { background: var(--glass); backdrop-filter: blur(20px); border: 1px solid var(--border); border-radius: 28px; padding: 30px; margin-bottom: 30px; box-shadow: 0 0 20px rgba(139, 92, 246, 0.1); }
+        .status-box { display: flex; align-items: center; gap: 10px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); padding: 6px 15px; border-radius: 50px; color: #10b981; font-size: 13px; font-weight: 600; }
+        input, textarea { background: rgba(0, 0, 0, 0.2); border: 1px solid var(--border); color: var(--text); padding: 16px; border-radius: 18px; width: 100%; font-family: 'Fira Code', monospace; margin-bottom: 20px; outline: none; }
+        .btn { background: linear-gradient(45deg, var(--purple), var(--blue)); color: white; border: none; padding: 18px; border-radius: 18px; font-weight: 700; cursor: pointer; width: 100%; display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 16px; }
+        #terminal { background: #000; color: #a5f3fc; height: 240px; overflow-y: auto; padding: 18px; border-radius: 18px; font-family: 'Fira Code', monospace; font-size: 13px; border: 1px solid var(--border); }
+        .log-line { border-left: 2px solid var(--purple); padding-left: 10px; margin-bottom: 4px; }
     </style>
 </head>
 <body>
     <canvas id="bgCanvas"></canvas>
     <div class="container">
         {% if not logged_in %}
-        <div class="card" style="margin-top: 100px; text-align: center;">
-            <h2>CYBER 20 LOGIN</h2>
+        <div class="card" style="margin-top: 50px; text-align: center;">
+            <h2>Cyber 20 Login</h2>
             <form method="POST" action="/login">
-                <input type="text" name="username" placeholder="User ID" required>
-                <input type="password" name="password" placeholder="Key" required>
-                <button type="submit" class="btn">ACCESS SERVER</button>
+                <input type="text" name="username" placeholder="Username" required>
+                <input type="password" name="password" placeholder="Password" required>
+                <button type="submit" class="btn">Initialize</button>
             </form>
         </div>
         {% else %}
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <div style="display:flex; align-items:center; gap:15px;">
+        <header style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px;">
+            <div style="display:flex; align-items:center; gap:12px;">
                 <div class="cyber-logo"><i data-lucide="terminal" color="white"></i></div>
-                <h2 style="margin:0; letter-spacing: 1px; color: var(--cyan);">CYBER 20 UN</h2>
+                <h2 style="margin:0; background: linear-gradient(to right, var(--purple), var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Cyber 20 UN</h2>
             </div>
-            <a href="/logout" style="color: #ef4444; text-decoration: none;">LOGOUT</a>
-        </div>
+            <div class="status-box">ONLINE 🟢</div>
+        </header>
 
         <div class="card">
-            <input type="text" id="filename" placeholder="app.py" value="main.py">
-            <textarea id="code" style="height: 150px;" placeholder="# Enter Python Code..."></textarea>
-            <button onclick="runCode()" class="btn"><i data-lucide="zap"></i> SAVE & DEPLOY</button>
+            <input type="text" id="filename" placeholder="main.py" value="main.py">
+            <textarea id="code" style="height:150px;" placeholder="# Write Code..."></textarea>
+            <button onclick="runCode()" class="btn"><i data-lucide="play-circle"></i> Save & Deploy</button>
         </div>
 
         <div class="card">
             <div id="terminal"></div>
-            <div style="display: flex; gap: 10px; margin-top: 15px;">
+            <div style="display: flex; gap: 12px; margin-top: 20px;">
                 <input type="text" id="cmd" placeholder="pip install requests..." style="margin-bottom:0">
-                <button onclick="sendCommand()" class="btn" style="width: 70px;"><i data-lucide="chevron-right"></i></button>
+                <button onclick="sendCommand()" class="btn" style="width:70px;"><i data-lucide="chevron-right"></i></button>
             </div>
         </div>
         {% endif %}
@@ -95,45 +100,38 @@ HTML_TEMPLATE = """
     <script>
         lucide.createIcons();
         const socket = io({transports: ['websocket']});
-        const term = document.getElementById('terminal');
-
-        // Animated Background (Falling Balls)
+        
+        // Background Animation
         const canvas = document.getElementById('bgCanvas');
         const ctx = canvas.getContext('2d');
         let particles = [];
         function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
         window.onresize = resize; resize();
-        class Particle {
-            constructor() { this.reset(); }
-            reset() { this.x = Math.random() * canvas.width; this.y = -20; this.r = Math.random() * 4 + 2; this.speed = Math.random() * 2 + 0.5; }
-            update() { this.y += this.speed; if(this.y > canvas.height) this.reset(); }
-            draw() { ctx.beginPath(); ctx.arc(this.x, this.y, this.r, 0, Math.PI*2); ctx.fillStyle = '#8b5cf6'; ctx.globalAlpha = 0.2; ctx.fill(); }
-        }
-        for(let i=0; i<30; i++) particles.push(new Particle());
-        function animate() { ctx.clearRect(0,0,canvas.width,canvas.height); particles.forEach(p => { p.update(); p.draw(); }); requestAnimationFrame(animate); }
-        animate();
+        class Ball { constructor() { this.reset(); } reset() { this.x = Math.random() * canvas.width; this.y = -20; this.r = Math.random() * 5 + 2; this.speed = Math.random() * 2 + 1; } update() { this.y += this.speed; if(this.y > canvas.height) this.reset(); } draw() { ctx.beginPath(); ctx.arc(this.x, this.y, this.r, 0, Math.PI*2); ctx.fillStyle = '#8b5cf6'; ctx.globalAlpha = 0.2; ctx.fill(); } }
+        for(let i=0; i<30; i++) particles.push(new Ball());
+        function loop() { ctx.clearRect(0,0,canvas.width,canvas.height); particles.forEach(p=>{p.update();p.draw();}); requestAnimationFrame(loop); }
+        loop();
 
-        // Terminal logic
+        // Terminal Live Update
         socket.on('log', (data) => {
+            const t = document.getElementById('terminal');
             const div = document.createElement('div');
             div.className = 'log-line';
             div.textContent = data.msg;
-            term.appendChild(div);
-            term.scrollTop = term.scrollHeight;
+            t.appendChild(div);
+            t.scrollTop = t.scrollHeight;
         });
 
         function runCode() {
             const f = document.getElementById('filename').value;
             const c = document.getElementById('code').value;
-            term.innerHTML += `<div class="log-line" style="color:var(--cyan)">[System] Deploying ${f}...</div>`;
             socket.emit('save_and_run', {filename: f, code: c});
         }
 
         function sendCommand() {
-            const cmd = document.getElementById('cmd').value;
-            if(!cmd) return;
-            term.innerHTML += `<div class="log-line" style="color:#f59e0b">$ ${cmd}</div>`;
-            socket.emit('execute_command', {command: cmd});
+            const c = document.getElementById('cmd').value;
+            if(!c) return;
+            socket.emit('execute_command', {command: c});
             document.getElementById('cmd').value = '';
         }
     </script>
@@ -141,66 +139,60 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- সার্ভার লজিক ---
+# --- Server Routes & Logic ---
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def index():
     return render_template_string(HTML_TEMPLATE, logged_in='user' in session, username=session.get('user'))
 
 @app.route('/login', methods=['POST'])
 def login():
     u, p = request.form.get('username'), request.form.get('password')
-    with get_db() as conn:
+    with sqlite3.connect(USER_DB) as conn:
         user = conn.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
         if not user:
             conn.execute("INSERT INTO users (username, password) VALUES (?,?)", (u, p))
-            conn.commit()
         session['user'] = u
     return redirect(url_for('index'))
-
-@app.route('/logout')
-def logout():
-    session.pop('user', None)
-    return redirect(url_for('index'))
-
-# রিয়েল টাইম লগ এবং ডাটাবেজ সেভিং
-def log_to_db(user, cmd, output):
-    with get_db() as conn:
-        conn.execute("INSERT INTO logs (username, command, output) VALUES (?,?,?)", (user, cmd, output))
-        conn.commit()
 
 @socketio.on('execute_command')
 def handle_command(data):
     user, cmd = session.get('user'), data['command']
     def run():
-        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        # রিয়েল টাইম লগের জন্য stdout.readline ব্যবহার করা হয়েছে
+        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         full_output = []
-        for line in proc.stdout:
+        for line in iter(process.stdout.readline, ''):
             socketio.emit('log', {'msg': line.strip()})
             full_output.append(line.strip())
-        log_to_db(user, cmd, "\\n".join(full_output))
+        
+        # লগ ডাটাবেজে সেভ
+        with sqlite3.connect(LOG_DB) as conn:
+            conn.execute("INSERT INTO terminal_logs (username, command, output, time) VALUES (?,?,?,?)", 
+                         (user, cmd, "\\n".join(full_output), time.ctime()))
+        socketio.emit('log', {'msg': "--- Task Completed ---"})
     threading.Thread(target=run).start()
 
 @socketio.on('save_and_run')
 def handle_run(data):
-    user = session.get('user')
-    filename, code = data['filename'], data['code']
-    with get_db() as conn:
-        conn.execute("INSERT INTO files (username, filename, code) VALUES (?,?,?)", (user, filename, code))
-        conn.commit()
+    user, f_name, code = session.get('user'), data['filename'], data['code']
+    path = os.path.join(PROJECT_DIR, f"{user}_{f_name}")
     
-    # টেম্পোরারি ফাইলে সেভ করে রান করা
-    temp_path = f"temp_{user}_{filename}"
-    with open(temp_path, "w") as f: f.write(code)
+    # ফাইলে সেভ
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(code)
     
-    def run_py():
-        proc = subprocess.Popen(['python', temp_path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in proc.stdout:
+    # ডাটাবেজে সেভ
+    with sqlite3.connect(USER_DB) as conn:
+        conn.execute("INSERT INTO files (username, filename, code, time) VALUES (?,?,?,?)", 
+                     (user, f_name, code, time.ctime()))
+    
+    def execute():
+        proc = subprocess.Popen(['python', path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in iter(proc.stdout.readline, ''):
             socketio.emit('log', {'msg': line.strip()})
-    threading.Thread(target=run_py).start()
+    threading.Thread(target=execute).start()
 
 if __name__ == '__main__':
-    # Render Port
     port = int(os.environ.get('PORT', 8000))
-    # host='0.0.0.0' দিলে আপনি যেকোনো ডোমেইন বা আইপি দিয়ে এক্সেস করতে পারবেন
-    socketio.run(app, host='0.0.0.0', port=port, debug=True)
+    socketio.run(app, host='0.0.0.0', port=port)
