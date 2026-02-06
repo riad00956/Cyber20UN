@@ -15,10 +15,10 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = secrets.token_urlsafe(32)
 app.config['PERMANENT_SESSION_LIFETIME'] = 3600
 
-# Threading mode for Render.com compatibility
+# Render.com এর জন্য polling only (WebSocket সাপোর্�্ট করে না)
 socketio = SocketIO(app,
                    cors_allowed_origins="*",
-                   transports=['websocket', 'polling'],
+                   transports=['polling'],  # শুধুমাত্র polling
                    async_mode='threading',
                    ping_timeout=60,
                    ping_interval=25,
@@ -47,9 +47,9 @@ def generate_access_keys():
             f.write(f"Access Key: {keys['access_key']}\n")
             f.write(f"Ghost Key: {keys['ghost_key']}\n")
         print(f"🚀 Access Keys Generated:")
-        print(f"🔑 Server URL: http://[YOUR_IP]:8000/?key={keys['server_key']}")
-        print(f"🔑 Access URL: http://[YOUR_IP]:8000/access/{keys['access_key']}")
-        print(f"🔑 Ghost URL: http://[YOUR_IP]:8000/ghost/{keys['ghost_key']}")
+        print(f"🔑 Server URL: https://[YOUR_APP].onrender.com/?key={keys['server_key']}")
+        print(f"🔑 Access URL: https://[YOUR_APP].onrender.com/access/{keys['access_key']}")
+        print(f"🔑 Ghost URL: https://[YOUR_APP].onrender.com/ghost/{keys['ghost_key']}")
         return keys
     else:
         try:
@@ -65,7 +65,6 @@ def generate_access_keys():
                         keys['ghost_key'] = line.split(': ')[1].strip()
                 return keys
         except:
-            # If file is corrupted, regenerate
             os.remove(SECRET_KEY_FILE)
             return generate_access_keys()
 
@@ -94,12 +93,11 @@ def init_dbs():
                             code TEXT,
                             time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
             
-            # Create index only after table exists
             try:
                 conn.execute('''CREATE INDEX IF NOT EXISTS idx_files_username 
                                ON files(username, time DESC)''')
             except:
-                pass  # Index might already exist
+                pass
     
         # Terminal Logs Database
         with sqlite3.connect(LOG_DB) as conn:
@@ -110,20 +108,17 @@ def init_dbs():
                             output TEXT,
                             time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
             
-            # Create index only after table exists
             try:
                 conn.execute('''CREATE INDEX IF NOT EXISTS idx_logs_username_time 
                                ON terminal_logs(username, time DESC)''')
             except:
-                pass  # Index might already exist
+                pass
         
         print("✅ Databases initialized successfully")
         
     except Exception as e:
         print(f"⚠️ Database initialization error: {e}")
-        # Continue anyway - tables might already exist
 
-# Initialize databases
 init_dbs()
 
 # Safe command execution
@@ -181,15 +176,12 @@ def is_safe_filename(filename):
     if not filename or len(filename) > 100:
         return False
     
-    # Only allow alphanumeric, dots, underscores, and hyphens
     if not re.match(r'^[a-zA-Z0-9_.-]+$', filename):
         return False
     
-    # Prevent directory traversal
     if '..' in filename or '/' in filename or '\\' in filename:
         return False
     
-    # Prevent dangerous extensions
     dangerous_ext = ['.sh', '.exe', '.bat', '.cmd', '.js', '.php']
     for ext in dangerous_ext:
         if filename.endswith(ext):
@@ -228,15 +220,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: var(--text);
             min-height: 100vh;
             overflow-x: hidden;
-        }
-        #bgCanvas {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -1;
-            opacity: 0.5;
         }
         .container {
             max-width: 900px;
@@ -422,7 +405,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <canvas id="bgCanvas"></canvas>
     <div class="container">
         {% if not logged_in %}
         <div class="card" style="margin-top: 50px; text-align: center;">
@@ -522,76 +504,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         // Initialize icons
         lucide.createIcons();
         
-        // Background animation
-        const canvas = document.getElementById('bgCanvas');
-        const ctx = canvas.getContext('2d');
-        let particles = [];
-        
-        function resizeCanvas() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-        }
-        
-        class Particle {
-            constructor() {
-                this.reset();
-            }
-            reset() {
-                this.x = Math.random() * canvas.width;
-                this.y = Math.random() * canvas.height;
-                this.size = Math.random() * 3 + 1;
-                this.speedX = Math.random() * 2 - 1;
-                this.speedY = Math.random() * 2 - 1;
-                this.color = Math.random() > 0.5 ? '#8b5cf6' : '#3b82f6';
-                this.alpha = Math.random() * 0.3 + 0.1;
-            }
-            update() {
-                this.x += this.speedX;
-                this.y += this.speedY;
-                
-                if (this.x > canvas.width) this.x = 0;
-                if (this.x < 0) this.x = canvas.width;
-                if (this.y > canvas.height) this.y = 0;
-                if (this.y < 0) this.y = canvas.height;
-            }
-            draw() {
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-                ctx.fillStyle = this.color;
-                ctx.globalAlpha = this.alpha;
-                ctx.fill();
-            }
-        }
-        
-        function initParticles() {
-            particles = [];
-            for (let i = 0; i < 50; i++) {
-                particles.push(new Particle());
-            }
-        }
-        
-        function animateParticles() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            particles.forEach(particle => {
-                particle.update();
-                particle.draw();
-            });
-            requestAnimationFrame(animateParticles);
-        }
-        
-        window.addEventListener('resize', () => {
-            resizeCanvas();
-            initParticles();
-        });
-        
-        // Initialize
-        resizeCanvas();
-        initParticles();
-        animateParticles();
-        
-        // Socket.IO connection
+        // Socket.IO connection - Render.com এর জন্য শুধুমাত্র polling
         const socket = io({
-            transports: ['websocket', 'polling'],
+            transports: ['polling'],  // শুধুমাত্র polling
             reconnection: true,
             reconnectionAttempts: 5,
             reconnectionDelay: 1000
@@ -599,7 +514,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         
         // Connection status
         socket.on('connect', () => {
-            console.log('Connected to server');
+            console.log('Connected to server via polling');
             updateStatus('CONNECTED 🟢', 'success');
             addLog('Connected to Cyber 20 UN server', 'info');
             loadUserFiles();
@@ -799,16 +714,6 @@ GHOST_TEMPLATE = """<!DOCTYPE html>
             font-family: 'Courier New', monospace;
             margin: 0;
             padding: 0;
-            overflow: hidden;
-        }
-        .matrix-bg {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            opacity: 0.1;
-            z-index: -1;
         }
         .container {
             max-width: 800px;
@@ -902,55 +807,6 @@ GHOST_TEMPLATE = """<!DOCTYPE html>
             Ghost Key: {{ ghost_key }}
         </div>
     </div>
-    
-    <script>
-        // Matrix rain effect
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.className = 'matrix-bg';
-        document.body.appendChild(canvas);
-        
-        const chars = "01";
-        const fontSize = 14;
-        let columns;
-        
-        function initMatrix() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-            columns = canvas.width / fontSize;
-        }
-        
-        const drops = [];
-        function setupDrops() {
-            drops.length = 0;
-            for (let i = 0; i < columns; i++) {
-                drops[i] = 1;
-            }
-        }
-        
-        function drawMatrix() {
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            
-            ctx.fillStyle = '#0f0';
-            ctx.font = fontSize + 'px monospace';
-            
-            for (let i = 0; i < drops.length; i++) {
-                const text = chars[Math.floor(Math.random() * chars.length)];
-                ctx.fillText(text, i * fontSize, drops[i] * fontSize);
-                
-                if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
-                    drops[i] = 0;
-                }
-                drops[i]++;
-            }
-        }
-        
-        window.addEventListener('resize', initMatrix);
-        initMatrix();
-        setupDrops();
-        setInterval(drawMatrix, 50);
-    </script>
 </body>
 </html>
 """
@@ -1130,7 +986,6 @@ ACCESS_TEMPLATE = """<!DOCTYPE html>
 # --- Server Routes & Logic ---
 @app.route('/')
 def index():
-    # Check for key-based access
     key = request.args.get('key')
     if key == ACCESS_KEYS['server_key']:
         session['user'] = 'admin'
@@ -1145,7 +1000,6 @@ def index():
 @app.route('/access/<key>')
 def access_mode(key):
     if key == ACCESS_KEYS['access_key']:
-        # Get server statistics
         try:
             with sqlite3.connect(USER_DB) as conn:
                 user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -1166,14 +1020,12 @@ def access_mode(key):
 @app.route('/ghost/<key>')
 def ghost_mode(key):
     if key == ACCESS_KEYS['ghost_key']:
-        # Get active user count
         try:
             with sqlite3.connect(USER_DB) as conn:
                 user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         except:
             user_count = 0
         
-        # Calculate uptime
         uptime_seconds = int(time.time() - app_start_time)
         uptime_str = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
         
@@ -1185,7 +1037,6 @@ def ghost_mode(key):
 
 @app.route('/status')
 def status():
-    # Get server statistics
     try:
         with sqlite3.connect(USER_DB) as conn:
             user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -1289,7 +1140,6 @@ def handle_connect():
         emit('log', {'msg': f"✅ Connected to Cyber 20 UN", 'type': 'info'})
         emit('log', {'msg': f"👤 Welcome back, {user}", 'type': 'info'})
         
-        # Send recent files
         try:
             with sqlite3.connect(USER_DB) as conn:
                 files = conn.execute(
@@ -1351,7 +1201,6 @@ def handle_command(data):
         emit('log', {'msg': 'Empty command', 'type': 'warning'})
         return
     
-    # Security check
     if not is_safe_command(cmd):
         emit('log', {'msg': '❌ Command not allowed for security reasons', 'type': 'error'})
         emit('log', {'msg': 'Allowed: python, pip (install/uninstall), system commands', 'type': 'info'})
@@ -1361,17 +1210,13 @@ def handle_command(data):
     
     def run_command():
         try:
-            # Create user directory
             user_dir = os.path.join(PROJECT_DIR, user)
             os.makedirs(user_dir, exist_ok=True)
             
-            # Prepare environment
             env = os.environ.copy()
             env['PYTHONUNBUFFERED'] = '1'
             
-            # Split command for better handling
             if cmd.startswith('cd '):
-                # Handle cd command separately
                 target_dir = cmd[3:].strip()
                 if target_dir == '~' or not target_dir:
                     target_dir = user_dir
@@ -1385,7 +1230,6 @@ def handle_command(data):
                     emit('log', {'msg': f'cd error: {str(e)}', 'type': 'error'})
                 return
             
-            # Run other commands
             process = subprocess.Popen(
                 cmd,
                 shell=True,
@@ -1402,7 +1246,6 @@ def handle_command(data):
             full_output = []
             start_time = time.time()
             
-            # Read output line by line
             while True:
                 if process.stdout:
                     output = process.stdout.readline()
@@ -1413,7 +1256,6 @@ def handle_command(data):
                         emit('log', {'msg': line, 'type': 'normal'})
                         full_output.append(line)
                 
-                # Timeout after 60 seconds
                 if time.time() - start_time > 60:
                     process.terminate()
                     emit('log', {'msg': '⏰ Command timeout (60s)', 'type': 'error'})
@@ -1426,7 +1268,6 @@ def handle_command(data):
             else:
                 emit('log', {'msg': f'❌ Command failed with exit code {return_code}', 'type': 'error'})
             
-            # Save to database
             try:
                 with sqlite3.connect(LOG_DB) as conn:
                     conn.execute(
@@ -1439,7 +1280,6 @@ def handle_command(data):
         except Exception as e:
             emit('log', {'msg': f'❌ Error: {str(e)}', 'type': 'error'})
     
-    # Run in background thread
     threading.Thread(target=run_command, daemon=True).start()
 
 @socketio.on('save_and_run')
@@ -1452,29 +1292,24 @@ def handle_run(data):
     f_name = data['filename'].strip()
     code = data['code']
     
-    # Validate filename
     if not is_safe_filename(f_name):
         emit('log', {'msg': '❌ Invalid filename', 'type': 'error'})
         emit('log', {'msg': 'Use only letters, numbers, dots, underscores, and hyphens', 'type': 'info'})
         return
     
-    # Validate code length
-    if len(code) > 100000:  # 100KB limit
+    if len(code) > 100000:
         emit('log', {'msg': '❌ Code too large (max 100KB)', 'type': 'error'})
         return
     
-    # Create user directory
     user_dir = os.path.join(PROJECT_DIR, user)
     os.makedirs(user_dir, exist_ok=True)
     
     path = os.path.join(user_dir, f_name)
     
-    # Save file
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
         
-        # Save to database
         try:
             with sqlite3.connect(USER_DB) as conn:
                 conn.execute(
@@ -1486,7 +1321,6 @@ def handle_run(data):
         
         emit('log', {'msg': f'💾 File saved: {f_name}', 'type': 'info'})
         
-        # Update file list
         try:
             with sqlite3.connect(USER_DB) as conn:
                 files = conn.execute(
@@ -1501,7 +1335,6 @@ def handle_run(data):
         except:
             pass
         
-        # Run Python file
         if f_name.endswith('.py'):
             def execute_python():
                 try:
@@ -1560,29 +1393,19 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("🚀 CYBER 20 UN SERVER STARTING...")
     print("="*60)
-    print(f"🔗 Server URL: http://0.0.0.0:8000/?key={ACCESS_KEYS['server_key']}")
-    print(f"🔗 Access URL: http://0.0.0.0:8000/access/{ACCESS_KEYS['access_key']}")
-    print(f"🔗 Ghost URL: http://0.0.0.0:8000/ghost/{ACCESS_KEYS['ghost_key']}")
+    print(f"🔗 Server URL: https://[YOUR_APP].onrender.com/?key={ACCESS_KEYS['server_key']}")
+    print(f"🔗 Access URL: https://[YOUR_APP].onrender.com/access/{ACCESS_KEYS['access_key']}")
+    print(f"🔗 Ghost URL: https://[YOUR_APP].onrender.com/ghost/{ACCESS_KEYS['ghost_key']}")
     print("="*60)
     print("📁 Project Directory:", PROJECT_DIR)
     print("💾 Databases:", USER_DB, LOG_DB)
-    print("⚡ Async Mode: threading")
+    print("⚡ Transport: polling only (Render.com compatible)")
     print("="*60 + "\n")
     
     port = int(os.environ.get('PORT', 8000))
     
-    # Use development server for local, production for Render
-    if os.environ.get('RENDER', 'false').lower() == 'true':
-        # Production mode for Render
-        socketio.run(app,
-                    host='0.0.0.0',
-                    port=port,
-                    debug=False,
-                    allow_unsafe_werkzeug=True)
-    else:
-        # Development mode
-        socketio.run(app,
-                    host='0.0.0.0',
-                    port=port,
-                    debug=True,
-                    allow_unsafe_werkzeug=True)
+    socketio.run(app,
+                host='0.0.0.0',
+                port=port,
+                debug=False,
+                allow_unsafe_werkzeug=True)
