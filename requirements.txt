@@ -1,4 +1,9 @@
-flask
-flask-socketio
-eventlet
-gunicorn
+Flask==3.0.0
+Flask-SocketIO==5.3.6
+eventlet==0.33.3
+python-socketio==5.11.1
+python-engineio==4.9.0
+Werkzeug==3.0.1
+gunicorn==21.2.0
+gevent==23.9.1
+gevent-websocket==0.10.1
