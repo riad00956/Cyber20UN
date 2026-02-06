@@ -12,7 +12,7 @@ import re
 
 # Flask & SocketIO Setup
 app = Flask(__name__)
-app.config['cyber_host'] = secrets.token_urlsafe(32)
+app.config['cyberhost'] = secrets.token_urlsafe(32)
 app.config['PERMANENT_SESSION_LIFETIME'] = 3600
 
 # Threading mode for Render.com compatibility
@@ -22,7 +22,7 @@ socketio = SocketIO(app,
                    async_mode='threading',
                    ping_timeout=60,
                    ping_interval=25,
-                   logger=True,
+                   logger=False,
                    engineio_logger=False)
 
 # Database Paths
@@ -77,38 +77,53 @@ def hash_password(password):
 
 # --- Database Initialize ---
 def init_dbs():
-    # User & File Database
-    with sqlite3.connect(USER_DB) as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS users 
-                       (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        username TEXT UNIQUE NOT NULL,
-                        password TEXT NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        
-        conn.execute('''CREATE TABLE IF NOT EXISTS files 
-                       (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        username TEXT NOT NULL,
-                        filename TEXT NOT NULL,
-                        code TEXT,
-                        time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE)''')
+    """Initialize databases with proper error handling"""
+    try:
+        # User & File Database
+        with sqlite3.connect(USER_DB) as conn:
+            conn.execute('''CREATE TABLE IF NOT EXISTS users 
+                           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            username TEXT UNIQUE NOT NULL,
+                            password TEXT NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+            
+            conn.execute('''CREATE TABLE IF NOT EXISTS files 
+                           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            username TEXT NOT NULL,
+                            filename TEXT NOT NULL,
+                            code TEXT,
+                            time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+            
+            # Create index only after table exists
+            try:
+                conn.execute('''CREATE INDEX IF NOT EXISTS idx_files_username 
+                               ON files(username, time DESC)''')
+            except:
+                pass  # Index might already exist
     
-    # Terminal Logs Database
-    with sqlite3.connect(LOG_DB) as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS terminal_logs 
-                       (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        username TEXT NOT NULL,
-                        command TEXT NOT NULL,
-                        output TEXT,
-                        time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE)''')
+        # Terminal Logs Database
+        with sqlite3.connect(LOG_DB) as conn:
+            conn.execute('''CREATE TABLE IF NOT EXISTS terminal_logs 
+                           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            username TEXT NOT NULL,
+                            command TEXT NOT NULL,
+                            output TEXT,
+                            time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+            
+            # Create index only after table exists
+            try:
+                conn.execute('''CREATE INDEX IF NOT EXISTS idx_logs_username_time 
+                               ON terminal_logs(username, time DESC)''')
+            except:
+                pass  # Index might already exist
         
-        conn.execute('''CREATE INDEX IF NOT EXISTS idx_logs_username_time 
-                       ON terminal_logs(username, time DESC)''')
+        print("✅ Databases initialized successfully")
         
-        conn.execute('''CREATE INDEX IF NOT EXISTS idx_files_username 
-                       ON files(username, time DESC)''')
+    except Exception as e:
+        print(f"⚠️ Database initialization error: {e}")
+        # Continue anyway - tables might already exist
 
+# Initialize databases
 init_dbs()
 
 # Safe command execution
@@ -116,7 +131,7 @@ ALLOWED_COMMANDS = {
     'ls', 'pwd', 'cd', 'cat', 'echo', 'python', 'python3',
     'pip', 'pip3', 'git', 'curl', 'wget', 'mkdir', 'rmdir',
     'cp', 'mv', 'find', 'grep', 'ps', 'whoami', 'date', 'uname',
-    'touch', 'nano', 'vim', 'head', 'tail', 'wc', 'sort', 'uniq'
+    'touch', 'head', 'tail', 'wc', 'sort', 'uniq'
 }
 
 def is_safe_command(command):
@@ -1131,9 +1146,13 @@ def index():
 def access_mode(key):
     if key == ACCESS_KEYS['access_key']:
         # Get server statistics
-        with sqlite3.connect(USER_DB) as conn:
-            user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        try:
+            with sqlite3.connect(USER_DB) as conn:
+                user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        except:
+            user_count = 0
+            file_count = 0
         
         return render_template_string(ACCESS_TEMPLATE,
                                     server_url=request.host_url,
@@ -1148,8 +1167,11 @@ def access_mode(key):
 def ghost_mode(key):
     if key == ACCESS_KEYS['ghost_key']:
         # Get active user count
-        with sqlite3.connect(USER_DB) as conn:
-            user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        try:
+            with sqlite3.connect(USER_DB) as conn:
+                user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        except:
+            user_count = 0
         
         # Calculate uptime
         uptime_seconds = int(time.time() - app_start_time)
@@ -1164,13 +1186,19 @@ def ghost_mode(key):
 @app.route('/status')
 def status():
     # Get server statistics
-    with sqlite3.connect(USER_DB) as conn:
-        user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
-    
-    with sqlite3.connect(LOG_DB) as conn:
-        cmd_count = conn.execute("SELECT COUNT(*) FROM terminal_logs").fetchone()[0]
-        last_cmd = conn.execute("SELECT command, time FROM terminal_logs ORDER BY time DESC LIMIT 1").fetchone()
+    try:
+        with sqlite3.connect(USER_DB) as conn:
+            user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        
+        with sqlite3.connect(LOG_DB) as conn:
+            cmd_count = conn.execute("SELECT COUNT(*) FROM terminal_logs").fetchone()[0]
+            last_cmd = conn.execute("SELECT command, time FROM terminal_logs ORDER BY time DESC LIMIT 1").fetchone()
+    except:
+        user_count = 0
+        file_count = 0
+        cmd_count = 0
+        last_cmd = None
     
     return jsonify({
         'status': 'online',
@@ -1204,19 +1232,23 @@ def login():
     
     hashed_pwd = hash_password(p)
     
-    with sqlite3.connect(USER_DB) as conn:
-        user = conn.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
-        if not user:
-            try:
-                conn.execute("INSERT INTO users (username, password) VALUES (?,?)", (u, hashed_pwd))
-            except sqlite3.IntegrityError:
-                return "Username already exists", 409
-        else:
-            if user[2] != hashed_pwd:
-                return "Invalid credentials", 401
-        
-        session['user'] = u
-        session.permanent = True
+    try:
+        with sqlite3.connect(USER_DB) as conn:
+            user = conn.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
+            if not user:
+                try:
+                    conn.execute("INSERT INTO users (username, password) VALUES (?,?)", (u, hashed_pwd))
+                except sqlite3.IntegrityError:
+                    return "Username already exists", 409
+            else:
+                if user[2] != hashed_pwd:
+                    return "Invalid credentials", 401
+            
+            session['user'] = u
+            session.permanent = True
+    except Exception as e:
+        print(f"Login error: {e}")
+        return "Server error", 500
     
     return redirect(url_for('index'))
 
@@ -1232,11 +1264,14 @@ def get_file(filename):
     
     user = session['user']
     
-    with sqlite3.connect(USER_DB) as conn:
-        file_data = conn.execute(
-            "SELECT filename, code FROM files WHERE username=? AND filename=? ORDER BY time DESC LIMIT 1",
-            (user, filename)
-        ).fetchone()
+    try:
+        with sqlite3.connect(USER_DB) as conn:
+            file_data = conn.execute(
+                "SELECT filename, code FROM files WHERE username=? AND filename=? ORDER BY time DESC LIMIT 1",
+                (user, filename)
+            ).fetchone()
+    except:
+        return jsonify({'success': False, 'error': 'Database error'}), 500
     
     if file_data:
         return jsonify({
@@ -1255,27 +1290,30 @@ def handle_connect():
         emit('log', {'msg': f"👤 Welcome back, {user}", 'type': 'info'})
         
         # Send recent files
-        with sqlite3.connect(USER_DB) as conn:
-            files = conn.execute(
-                "SELECT filename, time FROM files WHERE username=? ORDER BY time DESC LIMIT 10",
-                (user,)
-            ).fetchall()
+        try:
+            with sqlite3.connect(USER_DB) as conn:
+                files = conn.execute(
+                    "SELECT filename, time FROM files WHERE username=? ORDER BY time DESC LIMIT 10",
+                    (user,)
+                ).fetchall()
+                
+                last_file = conn.execute(
+                    "SELECT filename, code FROM files WHERE username=? ORDER BY time DESC LIMIT 1",
+                    (user,)
+                ).fetchone()
             
-            last_file = conn.execute(
-                "SELECT filename, code FROM files WHERE username=? ORDER BY time DESC LIMIT 1",
-                (user,)
-            ).fetchone()
-        
-        emit('file_list', {'files': [
-            {'filename': f[0], 'time': f[1]}
-            for f in files
-        ]})
-        
-        if last_file:
-            emit('session_restore', {'last_file': {
-                'filename': last_file[0],
-                'code': last_file[1]
-            }})
+            emit('file_list', {'files': [
+                {'filename': f[0], 'time': f[1]}
+                for f in files
+            ]})
+            
+            if last_file:
+                emit('session_restore', {'last_file': {
+                    'filename': last_file[0],
+                    'code': last_file[1]
+                }})
+        except Exception as e:
+            emit('log', {'msg': f"⚠️ Error loading files: {str(e)}", 'type': 'warning'})
     else:
         emit('log', {'msg': 'Please login first', 'type': 'error'})
 
@@ -1286,11 +1324,14 @@ def handle_get_files():
     
     user = session['user']
     
-    with sqlite3.connect(USER_DB) as conn:
-        files = conn.execute(
-            "SELECT filename, time FROM files WHERE username=? ORDER BY time DESC LIMIT 20",
-            (user,)
-        ).fetchall()
+    try:
+        with sqlite3.connect(USER_DB) as conn:
+            files = conn.execute(
+                "SELECT filename, time FROM files WHERE username=? ORDER BY time DESC LIMIT 20",
+                (user,)
+            ).fetchall()
+    except:
+        files = []
     
     emit('file_list', {'files': [
         {'filename': f[0], 'time': f[1]}
@@ -1386,11 +1427,14 @@ def handle_command(data):
                 emit('log', {'msg': f'❌ Command failed with exit code {return_code}', 'type': 'error'})
             
             # Save to database
-            with sqlite3.connect(LOG_DB) as conn:
-                conn.execute(
-                    "INSERT INTO terminal_logs (username, command, output, time) VALUES (?,?,?,?)",
-                    (user, cmd, "\n".join(full_output[:1000]), datetime.now().isoformat())
-                )
+            try:
+                with sqlite3.connect(LOG_DB) as conn:
+                    conn.execute(
+                        "INSERT INTO terminal_logs (username, command, output, time) VALUES (?,?,?,?)",
+                        (user, cmd, "\n".join(full_output[:1000]), datetime.now().isoformat())
+                    )
+            except Exception as e:
+                emit('log', {'msg': f'⚠️ Failed to save log: {str(e)}', 'type': 'warning'})
             
         except Exception as e:
             emit('log', {'msg': f'❌ Error: {str(e)}', 'type': 'error'})
@@ -1431,16 +1475,31 @@ def handle_run(data):
             f.write(code)
         
         # Save to database
-        with sqlite3.connect(USER_DB) as conn:
-            conn.execute(
-                "INSERT INTO files (username, filename, code, time) VALUES (?,?,?,?)",
-                (user, f_name, code, datetime.now().isoformat())
-            )
+        try:
+            with sqlite3.connect(USER_DB) as conn:
+                conn.execute(
+                    "INSERT INTO files (username, filename, code, time) VALUES (?,?,?,?)",
+                    (user, f_name, code, datetime.now().isoformat())
+                )
+        except Exception as e:
+            emit('log', {'msg': f'⚠️ Failed to save to database: {str(e)}', 'type': 'warning'})
         
         emit('log', {'msg': f'💾 File saved: {f_name}', 'type': 'info'})
-        emit('file_list', {'files': [
-            {'filename': f_name, 'time': datetime.now().isoformat()}
-        ]})
+        
+        # Update file list
+        try:
+            with sqlite3.connect(USER_DB) as conn:
+                files = conn.execute(
+                    "SELECT filename, time FROM files WHERE username=? ORDER BY time DESC LIMIT 10",
+                    (user,)
+                ).fetchall()
+            
+            emit('file_list', {'files': [
+                {'filename': f[0], 'time': f[1]}
+                for f in files
+            ]})
+        except:
+            pass
         
         # Run Python file
         if f_name.endswith('.py'):
@@ -1479,16 +1538,19 @@ def handle_run(data):
 def handle_restore_session():
     if 'user' in session:
         user = session['user']
-        with sqlite3.connect(USER_DB) as conn:
-            last_file = conn.execute(
-                "SELECT filename, code FROM files WHERE username=? ORDER BY time DESC LIMIT 1",
-                (user,)
-            ).fetchone()
-            if last_file:
-                emit('session_restore', {'last_file': {
-                    'filename': last_file[0],
-                    'code': last_file[1]
-                }})
+        try:
+            with sqlite3.connect(USER_DB) as conn:
+                last_file = conn.execute(
+                    "SELECT filename, code FROM files WHERE username=? ORDER BY time DESC LIMIT 1",
+                    (user,)
+                ).fetchone()
+                if last_file:
+                    emit('session_restore', {'last_file': {
+                        'filename': last_file[0],
+                        'code': last_file[1]
+                    }})
+        except:
+            pass
 
 # Global start time for uptime calculation
 app_start_time = time.time()
