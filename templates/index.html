@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyber 20 UN</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            --bg: #020617; --purple: #8b5cf6; --blue: #3b82f6; --cyan: #06b6d4;
+            --text: #f8fafc; --glass: rgba(15, 23, 42, 0.6); --border: rgba(255, 255, 255, 0.1);
+        }
+        .light-mode {
+            --bg: #f1f5f9; --purple: #6366f1; --blue: #2563eb; --text: #0f172a;
+            --glass: rgba(255, 255, 255, 0.7); --border: rgba(0, 0, 0, 0.1);
+        }
+        * { box-sizing: border-box; transition: all 0.3s ease; }
+        body {
+            margin: 0; font-family: 'Poppins', sans-serif; background: var(--bg);
+            color: var(--text); min-height: 100vh; display: flex; flex-direction: column;
+        }
+        #bgCanvas { position: fixed; top: 0; left: 0; z-index: -1; filter: blur(2px); }
+        .container { max-width: 850px; margin: auto; padding: 20px; width: 100%; z-index: 1; }
+        
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .logo-container { display: flex; align-items: center; gap: 10px; }
+        .cyber-logo {
+            width: 40px; height: 40px; background: linear-gradient(135deg, var(--purple), var(--blue));
+            border-radius: 10px; display: flex; align-items: center; justify-content: center;
+        }
+        
+        .card {
+            background: var(--glass); backdrop-filter: blur(20px); border: 1px solid var(--border);
+            border-radius: 24px; padding: 25px; margin-bottom: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        input, textarea {
+            background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border);
+            color: var(--text); padding: 14px; border-radius: 14px;
+            width: 100%; font-family: 'Fira Code', monospace; outline: none; margin-bottom: 15px;
+        }
+        textarea { height: 200px; resize: none; }
+        
+        .btn {
+            background: linear-gradient(45deg, var(--purple), var(--blue));
+            color: white; border: none; padding: 15px; border-radius: 14px;
+            font-weight: 700; cursor: pointer; width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px;
+        }
+        .btn:hover { transform: translateY(-2px); filter: brightness(1.1); }
+
+        #terminal {
+            background: #000; color: #a5f3fc; height: 200px; overflow-y: auto;
+            padding: 15px; border-radius: 14px; font-family: 'Fira Code', monospace; font-size: 12px;
+        }
+        
+        /* File Manager Styling */
+        .file-list { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 10px; }
+        .file-card {
+            background: rgba(255,255,255,0.05); padding: 10px 15px; border-radius: 12px;
+            border: 1px solid var(--border); min-width: 120px; text-align: center; cursor: pointer;
+        }
+        .file-card:hover { border-color: var(--cyan); }
+        .file-name { font-size: 11px; margin-bottom: 5px; overflow: hidden; }
+        .file-actions { display: flex; justify-content: center; gap: 10px; color: var(--purple); }
+
+        .status-box { color: #10b981; font-size: 12px; font-weight: bold; display: flex; align-items: center; gap: 5px; }
+        .live-dot { width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+    <canvas id="bgCanvas"></canvas>
+
+    {% if not logged_in %}
+    <div class="container" style="max-width: 400px; text-align: center; margin-top: 100px;">
+        <div class="card">
+            <h2 style="color: var(--purple)">CYBER 20 UN</h2>
+            <form action="/login" method="POST">
+                <input type="text" name="username" placeholder="Username" required autocomplete="off">
+                <input type="password" name="password" placeholder="Password" required>
+                <button class="btn">INITIALIZE SESSION</button>
+            </form>
+        </div>
+    </div>
+    {% else %}
+    <div class="container">
+        <header class="header">
+            <div class="logo-container">
+                <div class="cyber-logo"><i data-lucide="terminal" color="white"></i></div>
+                <h2 style="margin:0; font-size: 18px;">Cyber 20 UN</h2>
+            </div>
+            <div style="display: flex; align-items: center; gap: 15px;">
+                <div class="status-box"><div class="live-dot"></div> ONLINE</div>
+                <button onclick="toggleTheme()" style="background:none; border:none; color:var(--text);"><i data-lucide="sun" id="theme-icon"></i></button>
+            </div>
+        </header>
+
+        <div class="card">
+            <div style="margin-bottom: 15px;">
+                <span style="font-size: 12px; opacity: 0.6;">FILE MANAGER</span>
+                <div id="fileManager" class="file-list">
+                    <!-- Files will appear here -->
+                </div>
+            </div>
+            <div style="display:flex; align-items:center; gap:10px;">
+                <i data-lucide="code-2" color="var(--purple)"></i>
+                <input type="text" id="filename" placeholder="main.py" style="margin:0">
+            </div>
+            <textarea id="code" placeholder="# Write your magic code..."></textarea>
+            <button id="deployBtn" onclick="runCode()" class="btn">
+                <i data-lucide="play-circle"></i> SAVE & DEPLOY
+            </button>
+        </div>
+
+        <div class="card">
+            <div id="terminal"></div>
+            <div style="display: flex; gap: 10px; margin-top: 15px;">
+                <input type="text" id="cmd" placeholder="Enter Command (pip install...)" style="margin:0">
+                <button onclick="sendCommand()" class="btn" style="width: 60px;">
+                    <i data-lucide="chevron-right"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <script>
+        lucide.createIcons();
+        const socket = io({transports: ['polling']});
+
+        // Background Animation
+        const canvas = document.getElementById('bgCanvas');
+        const ctx = canvas.getContext('2d');
+        let particles = [];
+        function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+        window.onresize = resize; resize();
+        class Particle {
+            constructor() { this.reset(); }
+            reset() {
+                this.x = Math.random() * canvas.width; this.y = -20;
+                this.speed = Math.random() * 2 + 0.5; this.r = Math.random() * 3;
+            }
+            update() { this.y += this.speed; if(this.y > canvas.height) this.reset(); }
+            draw() { ctx.fillStyle = '#8b5cf6'; ctx.globalAlpha = 0.2; ctx.beginPath(); ctx.arc(this.x, this.y, this.r, 0, Math.PI*2); ctx.fill(); }
+        }
+        for(let i=0; i<30; i++) particles.push(new Particle());
+        function anim() { ctx.clearRect(0,0,canvas.width,canvas.height); particles.forEach(p=>{p.update();p.draw();}); requestAnimationFrame(anim); }
+        anim();
+
+        // Theme Toggle
+        function toggleTheme() {
+            document.body.classList.toggle('light-mode');
+            const icon = document.getElementById('theme-icon');
+            const isLight = document.body.classList.contains('light-mode');
+            icon.setAttribute('data-lucide', isLight ? 'moon' : 'sun');
+            lucide.createIcons();
+        }
+
+        // --- Core Functions ---
+        const term = document.getElementById('terminal');
+        socket.on('log', data => {
+            const div = document.createElement('div');
+            div.style.color = data.type === 'cmd' ? 'var(--cyan)' : (data.type === 'info' ? 'var(--purple)' : '#a5f3fc');
+            div.textContent = (data.type === 'cmd' ? '> ' : '') + data.msg;
+            term.appendChild(div);
+            term.scrollTop = term.scrollHeight;
+        });
+
+        function runCode() {
+            const filename = document.getElementById('filename').value || 'main.py';
+            const code = document.getElementById('code').value;
+            const btn = document.getElementById('deployBtn');
+            btn.innerHTML = '<i data-lucide="loader" class="spin"></i> DEPLOYING...';
+            lucide.createIcons();
+            socket.emit('save_run', {filename, code});
+            setTimeout(() => {
+                btn.innerHTML = '<i data-lucide="play-circle"></i> SAVE & DEPLOY';
+                lucide.createIcons();
+                socket.emit('get_files');
+            }, 1000);
+        }
+
+        function sendCommand() {
+            const cmd = document.getElementById('cmd').value;
+            if(!cmd) return;
+            socket.emit('execute_command', {command: cmd});
+            document.getElementById('cmd').value = '';
+        }
+
+        // File Manager Logic
+        socket.on('file_list', data => {
+            const manager = document.getElementById('fileManager');
+            manager.innerHTML = '';
+            data.files.forEach(name => {
+                const card = document.createElement('div');
+                card.className = 'file-card';
+                card.innerHTML = `
+                    <div class="file-name">${name}</div>
+                    <div class="file-actions">
+                        <i data-lucide="edit-3" size="14" onclick="socket.emit('load_file', {filename:'${name}'})"></i>
+                        <i data-lucide="trash-2" size="14" onclick="if(confirm('Delete ${name}?')) socket.emit('delete_file', {filename:'${name}'})"></i>
+                    </div>
+                `;
+                manager.appendChild(card);
+            });
+            lucide.createIcons();
+        });
+
+        socket.on('file_data', data => {
+            document.getElementById('filename').value = data.filename;
+            document.getElementById('code').value = data.code;
+        });
+
+        // Initialize file list
+        if(document.getElementById('fileManager')) {
+            setInterval(() => socket.emit('get_files'), 5000);
+            socket.emit('get_files');
+        }
+    </script>
+
+    <style>
+        .spin { animation: rotate 1s linear infinite; }
+        @keyframes rotate { from {transform:rotate(0deg)} to {transform:rotate(360deg)} }
+    </style>
+</body>
+</html>
