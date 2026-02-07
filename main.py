@@ -2,18 +2,16 @@ import os
 import subprocess
 import threading
 import sqlite3
-import time
 import hashlib
 import secrets
-import json
 import sys
-from datetime import datetime
-from flask import Flask, render_template_string, request, session, redirect, url_for, jsonify
+from flask import Flask, render_template_string, request, session, redirect
 from flask_socketio import SocketIO, emit
 
 # --- Setup ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = secrets.token_urlsafe(32)
+# Render compatibility for SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', transports=['polling'])
 
 USER_DB = "cyber_vault.db"
@@ -30,36 +28,13 @@ with get_db() as conn:
     conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT UNIQUE, password TEXT)')
     conn.execute('CREATE TABLE IF NOT EXISTS files (username TEXT, filename TEXT, code TEXT, PRIMARY KEY(username, filename))')
 
-# --- Logic ---
-@app.route('/')
-def index():
-    if 'user' not in session: return render_template_string(HTML_UI, logged_in=False)
-    return render_template_string(HTML_UI, logged_in=True, username=session['user'])
-
-@app.route('/login', methods=['POST'])
-def login():
-    u, p = request.form.get('username'), request.form.get('password')
-    hp = hashlib.sha256(p.encode()).hexdigest()
-    with get_db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
-        if not user: conn.execute("INSERT INTO users VALUES (?,?)", (u, hp))
-        elif user['password'] != hp: return "Error", 401
-    session['user'] = u
-    return redirect('/')
-
-# --- Terminal Fix (Immediate Output) ---
-@socketio.on('execute_command')
-def handle_command(data):
-    if 'user' not in session: return
-    user = session['user']
-    cmd = data['command'].strip()
-    user_path = os.path.join(PROJECT_DIR, user)
-    os.makedirs(user_path, exist_ok=True)
-
-    emit('log', {'msg': f'user@{user}:~$ {cmd}', 'type': 'cmd'})
-
+# --- Helper: Command Executor ---
+def execute_system_command(cmd, user_path, user):
+    """কমান্ড রান করার মূল ফাংশন যা টার্মিনালে আউটপুট পাঠাবে"""
+    socketio.emit('log', {'msg': f'user@{user}:~$ {cmd}', 'type': 'cmd'})
+    
     def run():
-        # Using stdbuf to disable buffering for real-time output
+        # subprocess.STDOUT stderr-কেও stdout-এ নিয়ে আসে
         process = subprocess.Popen(
             cmd, shell=True, cwd=user_path,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
@@ -68,95 +43,135 @@ def handle_command(data):
         
         for line in iter(process.stdout.readline, ''):
             if line:
-                socketio.emit('log', {'msg': line.strip(), 'type': 'output'})
+                socketio.emit('log', {'msg': line.rstrip(), 'type': 'output'})
         
         process.stdout.close()
-        return_code = process.wait()
-        if return_code == 0:
-            socketio.emit('log', {'msg': '--- Command Finished ---', 'type': 'success'})
-        else:
-            socketio.emit('log', {'msg': f'--- Failed with code {return_code} ---', 'type': 'error'})
+        process.wait()
+        socketio.emit('log', {'msg': '--- Execution Finished ---', 'type': 'info'})
 
     threading.Thread(target=run).start()
+
+# --- Routes ---
+@app.route('/')
+def index():
+    if 'user' not in session: return render_template_string(HTML_UI, logged_in=False)
+    return render_template_string(HTML_UI, logged_in=True, username=session['user'])
+
+@app.route('/login', methods=['POST'])
+def login():
+    u, p = request.form.get('username').lower().strip(), request.form.get('password')
+    hp = hashlib.sha256(p.encode()).hexdigest()
+    with get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
+        if not user: conn.execute("INSERT INTO users VALUES (?,?)", (u, hp))
+        elif user['password'] != hp: return "Login Failed", 401
+    session['user'] = u
+    return redirect('/')
+
+# --- Socket Events ---
+@socketio.on('execute_command')
+def handle_command(data):
+    if 'user' not in session: return
+    user = session['user']
+    cmd = data['command'].strip()
+    user_path = os.path.join(PROJECT_DIR, user)
+    os.makedirs(user_path, exist_ok=True)
+    execute_system_command(cmd, user_path, user)
 
 @socketio.on('save_run')
 def save_run(data):
     if 'user' not in session: return
-    user, filename, code = session['user'], data['filename'], data['code']
-    path = os.path.join(PROJECT_DIR, user, filename)
-    with open(path, 'w') as f: f.write(code)
-    handle_command({'command': f'python3 {filename}'})
+    user = session['user']
+    filename = data['filename'].strip()
+    code = data['code']
+    
+    user_path = os.path.join(PROJECT_DIR, user)
+    os.makedirs(user_path, exist_ok=True)
+    
+    # ফাইলটি ডিস্কে সেভ করা
+    path = os.path.join(user_path, filename)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(code)
+    
+    # রান কমান্ড তৈরি (python বা python3 চেক)
+    run_cmd = f"python3 {filename}"
+    execute_system_command(run_cmd, user_path, user)
 
 # --- Mobile UI ---
 HTML_UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cyber 20 UN Mobile</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Cyber 20 UN IDE</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
-        body { margin: 0; background: #050505; color: #fff; font-family: sans-serif; }
+        body { margin: 0; background: #08080c; color: #e0e0e0; font-family: 'Courier New', monospace; overflow: hidden; }
         .container { display: flex; flex-direction: column; height: 100vh; }
-        .header { background: #111; padding: 10px; border-bottom: 2px solid #bc13fe; font-size: 14px; }
+        .header { background: #1a1a2e; padding: 12px; border-bottom: 2px solid #bc13fe; font-size: 13px; font-weight: bold; display: flex; justify-content: space-between; }
         
-        /* Layout for Mobile */
         .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-        .section { flex: 1; display: flex; flex-direction: column; padding: 5px; box-sizing: border-box; }
+        .section { flex: 1; display: flex; flex-direction: column; padding: 8px; box-sizing: border-box; min-height: 0; }
         
-        h3 { margin: 5px 0; font-size: 14px; color: #bc13fe; text-transform: uppercase; }
+        h3 { margin: 0 0 5px 0; font-size: 12px; color: #00f2ff; letter-spacing: 1px; }
+        
         textarea, #terminal { 
             flex: 1; background: #000; color: #0f0; border: 1px solid #333; 
-            padding: 10px; font-family: monospace; font-size: 12px; 
-            border-radius: 5px; outline: none;
+            padding: 10px; font-family: 'Fira Code', monospace; font-size: 13px; 
+            border-radius: 4px; outline: none; resize: none;
         }
-        #terminal { overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+        #terminal { overflow-y: auto; white-space: pre-wrap; color: #a5f3fc; border-color: #bc13fe; }
         
         input { 
-            background: #111; color: #fff; border: 1px solid #bc13fe; 
-            padding: 12px; border-radius: 5px; margin-bottom: 5px; 
+            background: #111; color: #fff; border: 1px solid #333; 
+            padding: 10px; border-radius: 4px; margin-bottom: 5px; font-size: 14px;
         }
         .btn { 
-            background: #bc13fe; color: #fff; border: none; 
-            padding: 12px; border-radius: 5px; font-weight: bold; cursor: pointer;
+            background: linear-gradient(45deg, #bc13fe, #7a12f5); color: #fff; border: none; 
+            padding: 12px; border-radius: 4px; font-weight: bold; cursor: pointer; text-transform: uppercase;
         }
         
-        .login-box { padding: 40px; text-align: center; }
-        .cmd-line { color: #00f2ff; }
-        .err-line { color: #ff4444; }
-
-        /* Desktop Adjustments */
+        .cmd-line { color: #00f2ff; font-weight: bold; margin-top: 5px; }
+        .info-line { color: #bc13fe; font-style: italic; }
+        
         @media (min-width: 768px) {
             .content { flex-direction: row; }
-            .section { flex: 1; }
         }
     </style>
 </head>
 <body>
     {% if not logged_in %}
-    <div class="login-box">
-        <h2>CYBER 20 UN</h2>
-        <form action="/login" method="POST" style="display:flex; flex-direction:column; gap:10px;">
-            <input type="text" name="username" placeholder="Username">
-            <input type="password" name="password" placeholder="Password">
-            <button class="btn">Login / Register</button>
+    <div style="padding: 50px 20px; text-align: center;">
+        <h2 style="color:#bc13fe;">CYBER 20 UN</h2>
+        <form action="/login" method="POST" style="display:flex; flex-direction:column; gap:15px; max-width:300px; margin:auto;">
+            <input type="text" name="username" placeholder="Enter Username" required>
+            <input type="password" name="password" placeholder="Enter Password" required>
+            <button class="btn">Start Session</button>
         </form>
     </div>
     {% else %}
     <div class="container">
-        <div class="header">User: {{ username }} | Cyber 20 UN</div>
+        <div class="header">
+            <span>ID: {{ username }}</span>
+            <span style="color:#00f2ff;">CYBER 20 UN</span>
+        </div>
         <div class="content">
             <div class="section">
-                <h3>Editor</h3>
-                <input type="text" id="fname" value="main.py">
-                <textarea id="code">print("Hello from Mobile!")</textarea>
-                <button class="btn" style="margin-top:5px;" onclick="runCode()">Save & Run</button>
+                <h3>[#] EDITOR</h3>
+                <input type="text" id="fname" value="main.py" spellcheck="false" autocomplete="off">
+                <textarea id="code" spellcheck="false" autocomplete="off">print("System Check Success!")
+import sys
+print(f"Python Version: {sys.version}")</textarea>
+                <button class="btn" style="margin-top:5px;" onclick="runCode()">Save & Execute</button>
             </div>
             <div class="section">
-                <h3>Terminal</h3>
+                <h3>[>] TERMINAL</h3>
                 <div id="terminal"></div>
-                <input type="text" id="cmd" placeholder="Command (e.g. pip install requests)" 
-                       style="margin-top:5px;" onkeypress="if(event.key==='Enter') sendCmd()">
+                <input type="text" id="cmd" placeholder="Enter Command..." 
+                       style="margin-top:5px; border-color: #bc13fe;" 
+                       onkeypress="if(event.key==='Enter') sendCmd()"
+                       autocapitalize="none" autocomplete="off" spellcheck="false">
+                <button class="btn" style="background:#333; margin-top:5px; font-size:10px; padding:5px;" onclick="document.getElementById('terminal').innerHTML=''">Clear Terminal</button>
             </div>
         </div>
     </div>
@@ -167,7 +182,7 @@ HTML_UI = """
         socket.on('log', (data) => {
             const div = document.createElement('div');
             if(data.type === 'cmd') div.className = 'cmd-line';
-            if(data.type === 'error') div.className = 'err-line';
+            if(data.type === 'info') div.className = 'info-line';
             div.textContent = data.msg;
             term.appendChild(div);
             term.scrollTop = term.scrollHeight;
@@ -176,14 +191,19 @@ HTML_UI = """
         function runCode() {
             const filename = document.getElementById('fname').value;
             const code = document.getElementById('code').value;
+            if(!filename.endsWith('.py')) {
+                alert("Please use .py extension");
+                return;
+            }
             socket.emit('save_run', {filename, code});
         }
 
         function sendCmd() {
-            const cmd = document.getElementById('cmd').value;
+            const cmdInput = document.getElementById('cmd');
+            const cmd = cmdInput.value.trim();
             if(!cmd) return;
             socket.emit('execute_command', {command: cmd});
-            document.getElementById('cmd').value = '';
+            cmdInput.value = '';
         }
     </script>
     {% endif %}
@@ -192,4 +212,6 @@ HTML_UI = """
 """
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=10000, allow_unsafe_werkzeug=True)
+    # Render default port is 10000
+    port = int(os.environ.get('PORT', 10000))
+    socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
