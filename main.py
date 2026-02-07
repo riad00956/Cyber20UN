@@ -5,57 +5,88 @@ import sqlite3
 import hashlib
 import secrets
 import sys
-from flask import Flask, render_template_string, request, session, redirect
+import signal
+from flask import Flask, render_template, request, session, redirect, jsonify
 from flask_socketio import SocketIO, emit
 
-# --- Setup ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = secrets.token_urlsafe(32)
-# Render compatibility for SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', transports=['polling'])
 
 USER_DB = "cyber_vault.db"
 PROJECT_DIR = os.path.abspath("user_projects")
 os.makedirs(PROJECT_DIR, exist_ok=True)
 
+# হোস্টিং প্রসেসগুলো ট্র্যাক করার জন্য ডিকশনারি
+# {(username, filename): subprocess_object}
+active_hosts = {}
+
 def get_db():
     conn = sqlite3.connect(USER_DB, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
-# Database Init
+# Database setup - added 'is_hosted' column
 with get_db() as conn:
     conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT UNIQUE, password TEXT)')
-    conn.execute('CREATE TABLE IF NOT EXISTS files (username TEXT, filename TEXT, code TEXT, PRIMARY KEY(username, filename))')
+    conn.execute('''CREATE TABLE IF NOT EXISTS files 
+                   (username TEXT, filename TEXT, code TEXT, is_hosted INTEGER DEFAULT 0, 
+                    PRIMARY KEY(username, filename))''')
 
-# --- Helper: Command Executor ---
-def execute_system_command(cmd, user_path, user):
-    """কমান্ড রান করার মূল ফাংশন যা টার্মিনালে আউটপুট পাঠাবে"""
-    socketio.emit('log', {'msg': f'user@{user}:~$ {cmd}', 'type': 'cmd'})
+# --- Hosting Core Logic ---
+
+def stop_process(user, filename):
+    """ব্যাকগ্রাউন্ডে চলতে থাকা প্রসেস বন্ধ করার ফাংশন"""
+    key = (user, filename)
+    if key in active_hosts:
+        try:
+            # Linux/Unix-এ প্রসেস গ্রুপ বন্ধ করা
+            os.killpg(os.getpgid(active_hosts[key].pid), signal.SIGTERM)
+            del active_hosts[key]
+            socketio.emit('log', {'msg': f'Stopped: {filename}', 'type': 'info'})
+        except:
+            if key in active_hosts: del active_hosts[key]
+
+def start_hosting(user, filename, user_path):
+    """ফাইলটিকে ব্যাকগ্রাউন্ডে হোস্ট করার ফাংশন"""
+    # আগের প্রসেস থাকলে বন্ধ করা
+    stop_process(user, filename)
+    
+    socketio.emit('log', {'msg': f'🚀 Hosting Started: {filename}', 'type': 'info'})
     
     def run():
-        # subprocess.STDOUT stderr-কেও stdout-এ নিয়ে আসে
-        process = subprocess.Popen(
-            cmd, shell=True, cwd=user_path,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
-            text=True, bufsize=1, universal_newlines=True
-        )
-        
-        for line in iter(process.stdout.readline, ''):
-            if line:
-                socketio.emit('log', {'msg': line.rstrip(), 'type': 'output'})
-        
-        process.stdout.close()
-        process.wait()
-        socketio.emit('log', {'msg': '--- Execution Finished ---', 'type': 'info'})
+        try:
+            # start_new_session=True ব্যবহার করা হয়েছে যাতে মেইন অ্যাপ বন্ধ না হলেও এটি চলতে পারে
+            process = subprocess.Popen(
+                ["python3", "-u", filename], # -u for unbuffered output
+                cwd=user_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                preexec_fn=os.setsid 
+            )
+            
+            active_hosts[(user, filename)] = process
+            
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    socketio.emit('log', {'msg': f'[{filename}] {line.strip()}', 'type': 'output'})
+            
+            process.stdout.close()
+            process.wait()
+            
+        except Exception as e:
+            socketio.emit('log', {'msg': f'Host Error ({filename}): {str(e)}', 'type': 'error'})
 
-    threading.Thread(target=run).start()
+    threading.Thread(target=run, daemon=True).start()
 
 # --- Routes ---
+
 @app.route('/')
 def index():
-    if 'user' not in session: return render_template_string(HTML_UI, logged_in=False)
-    return render_template_string(HTML_UI, logged_in=True, username=session['user'])
+    if 'user' not in session: return render_template('index.html', logged_in=False)
+    return render_template('index.html', logged_in=True, username=session['user'])
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -68,150 +99,75 @@ def login():
     session['user'] = u
     return redirect('/')
 
-# --- Socket Events ---
+# --- Socket Operations ---
+
 @socketio.on('execute_command')
 def handle_command(data):
     if 'user' not in session: return
     user = session['user']
-    cmd = data['command'].strip()
+    cmd = data['command']
     user_path = os.path.join(PROJECT_DIR, user)
-    os.makedirs(user_path, exist_ok=True)
-    execute_system_command(cmd, user_path, user)
+    
+    socketio.emit('log', {'msg': f'user@{user}:~$ {cmd}', 'type': 'cmd'})
+    
+    def run_cmd():
+        proc = subprocess.Popen(cmd, shell=True, cwd=user_path, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in iter(proc.stdout.readline, ''):
+            socketio.emit('log', {'msg': line.strip(), 'type': 'output'})
+        proc.wait()
+    threading.Thread(target=run_cmd).start()
 
 @socketio.on('save_run')
 def save_run(data):
     if 'user' not in session: return
-    user = session['user']
-    filename = data['filename'].strip()
-    code = data['code']
-    
+    user, filename, code = session['user'], data['filename'], data['code']
     user_path = os.path.join(PROJECT_DIR, user)
     os.makedirs(user_path, exist_ok=True)
     
-    # ফাইলটি ডিস্কে সেভ করা
-    path = os.path.join(user_path, filename)
-    with open(path, 'w', encoding='utf-8') as f:
+    # Disk-এ সেভ করা
+    with open(os.path.join(user_path, filename), 'w', encoding='utf-8') as f:
         f.write(code)
     
-    # রান কমান্ড তৈরি (python বা python3 চেক)
-    run_cmd = f"python3 {filename}"
-    execute_system_command(run_cmd, user_path, user)
+    # DB-তে সেভ করা এবং হোস্ট স্ট্যাটাস আপডেট করা
+    with get_db() as conn:
+        conn.execute("INSERT OR REPLACE INTO files VALUES (?,?,?,?)", (user, filename, code, 1))
+    
+    # হোস্টিং ইঞ্জিন চালু করা
+    start_hosting(user, filename, user_path)
 
-# --- Mobile UI ---
-HTML_UI = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Cyber 20 UN IDE</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-    <style>
-        body { margin: 0; background: #08080c; color: #e0e0e0; font-family: 'Courier New', monospace; overflow: hidden; }
-        .container { display: flex; flex-direction: column; height: 100vh; }
-        .header { background: #1a1a2e; padding: 12px; border-bottom: 2px solid #bc13fe; font-size: 13px; font-weight: bold; display: flex; justify-content: space-between; }
-        
-        .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-        .section { flex: 1; display: flex; flex-direction: column; padding: 8px; box-sizing: border-box; min-height: 0; }
-        
-        h3 { margin: 0 0 5px 0; font-size: 12px; color: #00f2ff; letter-spacing: 1px; }
-        
-        textarea, #terminal { 
-            flex: 1; background: #000; color: #0f0; border: 1px solid #333; 
-            padding: 10px; font-family: 'Fira Code', monospace; font-size: 13px; 
-            border-radius: 4px; outline: none; resize: none;
-        }
-        #terminal { overflow-y: auto; white-space: pre-wrap; color: #a5f3fc; border-color: #bc13fe; }
-        
-        input { 
-            background: #111; color: #fff; border: 1px solid #333; 
-            padding: 10px; border-radius: 4px; margin-bottom: 5px; font-size: 14px;
-        }
-        .btn { 
-            background: linear-gradient(45deg, #bc13fe, #7a12f5); color: #fff; border: none; 
-            padding: 12px; border-radius: 4px; font-weight: bold; cursor: pointer; text-transform: uppercase;
-        }
-        
-        .cmd-line { color: #00f2ff; font-weight: bold; margin-top: 5px; }
-        .info-line { color: #bc13fe; font-style: italic; }
-        
-        @media (min-width: 768px) {
-            .content { flex-direction: row; }
-        }
-    </style>
-</head>
-<body>
-    {% if not logged_in %}
-    <div style="padding: 50px 20px; text-align: center;">
-        <h2 style="color:#bc13fe;">CYBER 20 UN</h2>
-        <form action="/login" method="POST" style="display:flex; flex-direction:column; gap:15px; max-width:300px; margin:auto;">
-            <input type="text" name="username" placeholder="Enter Username" required>
-            <input type="password" name="password" placeholder="Enter Password" required>
-            <button class="btn">Start Session</button>
-        </form>
-    </div>
-    {% else %}
-    <div class="container">
-        <div class="header">
-            <span>ID: {{ username }}</span>
-            <span style="color:#00f2ff;">CYBER 20 UN</span>
-        </div>
-        <div class="content">
-            <div class="section">
-                <h3>[#] EDITOR</h3>
-                <input type="text" id="fname" value="main.py" spellcheck="false" autocomplete="off">
-                <textarea id="code" spellcheck="false" autocomplete="off">print("System Check Success!")
-import sys
-print(f"Python Version: {sys.version}")</textarea>
-                <button class="btn" style="margin-top:5px;" onclick="runCode()">Save & Execute</button>
-            </div>
-            <div class="section">
-                <h3>[>] TERMINAL</h3>
-                <div id="terminal"></div>
-                <input type="text" id="cmd" placeholder="Enter Command..." 
-                       style="margin-top:5px; border-color: #bc13fe;" 
-                       onkeypress="if(event.key==='Enter') sendCmd()"
-                       autocapitalize="none" autocomplete="off" spellcheck="false">
-                <button class="btn" style="background:#333; margin-top:5px; font-size:10px; padding:5px;" onclick="document.getElementById('terminal').innerHTML=''">Clear Terminal</button>
-            </div>
-        </div>
-    </div>
-    <script>
-        const socket = io({transports: ['polling']});
-        const term = document.getElementById('terminal');
+@socketio.on('get_files')
+def list_files():
+    if 'user' not in session: return
+    with get_db() as conn:
+        files = conn.execute("SELECT filename, is_hosted FROM files WHERE username=?", (session['user'],)).fetchall()
+    emit('file_list', {'files': [{'name': f['filename'], 'hosted': f['is_hosted']} for f in files]})
 
-        socket.on('log', (data) => {
-            const div = document.createElement('div');
-            if(data.type === 'cmd') div.className = 'cmd-line';
-            if(data.type === 'info') div.className = 'info-line';
-            div.textContent = data.msg;
-            term.appendChild(div);
-            term.scrollTop = term.scrollHeight;
-        });
+@socketio.on('load_file')
+def load_file(data):
+    if 'user' not in session: return
+    with get_db() as conn:
+        file = conn.execute("SELECT * FROM files WHERE username=? AND filename=?", (session['user'], data['filename'])).fetchone()
+    if file: emit('file_data', {'filename': file['filename'], 'code': file['code']})
 
-        function runCode() {
-            const filename = document.getElementById('fname').value;
-            const code = document.getElementById('code').value;
-            if(!filename.endsWith('.py')) {
-                alert("Please use .py extension");
-                return;
-            }
-            socket.emit('save_run', {filename, code});
-        }
-
-        function sendCmd() {
-            const cmdInput = document.getElementById('cmd');
-            const cmd = cmdInput.value.trim();
-            if(!cmd) return;
-            socket.emit('execute_command', {command: cmd});
-            cmdInput.value = '';
-        }
-    </script>
-    {% endif %}
-</body>
-</html>
-"""
+@socketio.on('delete_file')
+def delete_file(data):
+    if 'user' not in session: return
+    user, filename = session['user'], data['filename']
+    
+    # ১. ব্যাকগ্রাউন্ড প্রসেস বন্ধ করা
+    stop_process(user, filename)
+    
+    # ২. ডিস্ক থেকে ফাইল মোছা
+    try: os.remove(os.path.join(PROJECT_DIR, user, filename))
+    except: pass
+    
+    # ৩. ডেটাবেস থেকে মোছা
+    with get_db() as conn:
+        conn.execute("DELETE FROM files WHERE username=? AND filename=?", (user, filename))
+    
+    list_files()
+    emit('log', {'msg': f'Deleted & Unhosted: {filename}', 'type': 'info'})
 
 if __name__ == '__main__':
-    # Render default port is 10000
     port = int(os.environ.get('PORT', 10000))
     socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
